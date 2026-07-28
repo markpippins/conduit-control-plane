@@ -96,9 +96,10 @@ export const RecentActivityWidget: React.FC<RecentActivityWidgetProps> = ({
 
     // 3. Work requests
     workRequests.forEach((wr) => {
+      const wrTime = (wr as any).recordedOnDt || wr.createdAt || new Date().toISOString();
       events.push({
-        id: `wr-${wr.id}-${wr.recordedOnDt || Date.now()}`,
-        timestamp: wr.recordedOnDt || new Date().toISOString(),
+        id: `wr-${wr.id}-${wrTime}`,
+        timestamp: wrTime,
         type: `WORK_REQ_${wr.attemptStatus}`,
         category: 'WORK_REQUEST',
         planId: wr.planId,
