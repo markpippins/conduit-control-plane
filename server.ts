@@ -174,6 +174,8 @@ async function startServer() {
       pgSchema: process.env.CONDUIT_PG_SCHEMA || 'conduit',
       wrpKernelActive: true,
       wrpKernelUrl: process.env.WRP_KERNEL_URL || 'http://localhost:3103',
+      conduitSrvActive: true,
+      conduitSrvUrl: process.env.CONDUIT_SRV_URL || 'http://localhost:3104',
       mcpServerUrl: process.env.MCP_BASE_URL || 'http://localhost:3100',
       activeLeasesCount: sessionsStore.filter(s => s.state === 'running').length,
       circuitBreakerTripped: circuitBreakerState.tripped,
@@ -673,6 +675,338 @@ async function startServer() {
     }
     const deletedCount = countBefore - receiptsStore.length;
     res.json({ deleted: deletedCount, plan_id: planId, types: typesToDelete });
+  });
+
+  // -------------------------------------------------------------
+  // 8. TypeScript conduit-srv (:3104) Routes
+  // -------------------------------------------------------------
+
+  // Health
+  app.get('/health', (req, res) => {
+    res.json({ status: 'ok', port: 3104, db: 'up', timestamp: new Date().toISOString() });
+  });
+
+  // Workflows
+  app.get('/workflows', (req, res) => {
+    const runningSessions = sessionsStore.filter(s => s.state === 'running');
+    const workflows = runningSessions.map(s => ({
+      workflowId: `plan-plan_0053-${s.role}`,
+      runId: s.id,
+      status: s.state,
+      startTime: s.started_at,
+      closeTime: null,
+      planId: 'plan_0053',
+      role: s.role,
+      pid: s.pid,
+    }));
+
+    res.json({
+      connected: true,
+      counts: {
+        running: workflows.length,
+        completed: 0,
+        failed: sessionsStore.filter(s => s.state === 'failed').length,
+        cancelled: 0,
+        total: sessionsStore.length,
+      },
+      workflows,
+    });
+  });
+
+  // Tickets
+  const mockTickets = [
+    {
+      id: 'TCK-2026-0053',
+      plan_id: 'plan_0053',
+      role: 'planner',
+      status: 'claimed',
+      tokens_used: 3600,
+      parent_ticket_id: null,
+      spawn_reason: null,
+      replacement_of: null,
+      closure_reason: null,
+      created_at: new Date(Date.now() - 7200000).toISOString(),
+      closed_at: null,
+    },
+    {
+      id: 'TCK-2026-0054',
+      plan_id: 'plan_0054',
+      role: 'builder',
+      status: 'claimed',
+      tokens_used: 1800,
+      parent_ticket_id: 'TCK-2026-0053',
+      spawn_reason: 'Child builder execution',
+      replacement_of: null,
+      closure_reason: null,
+      created_at: new Date(Date.now() - 3600000).toISOString(),
+      closed_at: null,
+    },
+  ];
+
+  app.post('/tickets/detect', (req, res) => {
+    res.json({
+      detected: true,
+      stale: 1,
+      expired: 0,
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  app.get('/tickets/lineage/:planId', (req, res) => {
+    const rawId = req.params.planId;
+    const planId = rawId.startsWith('plan_') ? rawId : `plan_${rawId}`;
+    const matched = mockTickets.filter(t => t.plan_id === planId);
+    res.json({
+      plan_id: planId,
+      tickets: matched.length > 0 ? matched : mockTickets,
+    });
+  });
+
+  // Tokens
+  app.get('/tokens/plan/:planId', (req, res) => {
+    const rawId = req.params.planId;
+    const planId = rawId.startsWith('plan_') ? rawId : `plan_${rawId}`;
+    const receipts = receiptsStore.filter(r => r.plan_id === planId);
+    const totalTokens = receipts.reduce((acc, r) => acc + (r.tokens_used || 0), 0);
+    res.json({
+      plan_id: planId,
+      total_tokens: totalTokens || 3600,
+      receipts: receipts.length || 2,
+    });
+  });
+
+  app.get('/tokens/role/:role', (req, res) => {
+    const role = req.params.role;
+    const receipts = receiptsStore.filter(r => r.agent_role === role);
+    const totalTokens = receipts.reduce((acc, r) => acc + (r.tokens_used || 0), 0);
+    res.json({
+      role,
+      total_tokens: totalTokens || 4200,
+      receipts: receipts.length || 3,
+    });
+  });
+
+  app.get('/tokens/ticket/:ticketId', (req, res) => {
+    const tId = req.params.ticketId;
+    const receipts = receiptsStore.filter(r => r.ticket_id === tId);
+    const totalTokens = receipts.reduce((acc, r) => acc + (r.tokens_used || 0), 0);
+    res.json({
+      ticket_id: tId,
+      tokens_used: totalTokens || 1500,
+    });
+  });
+
+  // Config
+  app.get('/config/cron', (req, res) => {
+    res.json({
+      cron: '*/3 * * * *',
+      intervalMinutes: 3,
+      description: 'Pipeline cron interval',
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  app.get('/config/failure-recovery', (req, res) => {
+    res.json({
+      max_retries_per_model: circuitBreakerState.max_retries_per_model,
+      retry_delay_seconds: circuitBreakerState.retry_delay_seconds,
+      max_fallbacks: circuitBreakerState.max_fallbacks,
+      push_back_to_pending: circuitBreakerState.push_back_to_pending,
+      circuit_breaker_retry_after: circuitBreakerState.retry_after,
+    });
+  });
+
+  app.post('/config/failure-recovery', (req, res) => {
+    if (typeof req.body.max_retries_per_model === 'number') circuitBreakerState.max_retries_per_model = req.body.max_retries_per_model;
+    if (typeof req.body.retry_delay_seconds === 'number') circuitBreakerState.retry_delay_seconds = req.body.retry_delay_seconds;
+    if (typeof req.body.max_fallbacks === 'number') circuitBreakerState.max_fallbacks = req.body.max_fallbacks;
+    if (typeof req.body.push_back_to_pending === 'boolean') circuitBreakerState.push_back_to_pending = req.body.push_back_to_pending;
+    if (typeof req.body.circuit_breaker_retry_after === 'number') circuitBreakerState.retry_after = req.body.circuit_breaker_retry_after;
+
+    res.json({ saved: true });
+  });
+
+  // Governance
+  const governanceEvents = [
+    {
+      id: 1,
+      receipt_id: 'RCP-PLAN-0053-1',
+      event_type: 'receipt:PROPOSED',
+      work_request_id: 'wr-uuid-0053',
+      plan_id: 'plan_0053',
+      agent_role: 'planner',
+      payload: { session_id: 'sess-1001', artifact_path: 'IMPLEMENTATION_PLANS/pending/auth-module.md', summary: 'Initial proposal', tokens_used: 1200 },
+      created_at: new Date(Date.now() - 7200000).toISOString(),
+      replayed_at: new Date().toISOString(),
+    },
+    {
+      id: 2,
+      receipt_id: 'RCP-PLAN-0053-2',
+      event_type: 'receipt:PLAN_CREATE',
+      work_request_id: 'wr-uuid-0053',
+      plan_id: 'plan_0053',
+      agent_role: 'planner',
+      payload: { session_id: 'sess-1001', artifact_path: 'IMPLEMENTATION_PLANS/active/auth-module.md', summary: 'Plan created and validated', tokens_used: 2400 },
+      created_at: new Date(Date.now() - 3600000).toISOString(),
+      replayed_at: new Date().toISOString(),
+    },
+  ];
+
+  app.post('/governance/replay', (req, res) => {
+    res.json({ ok: true, replayed: governanceEvents.length });
+  });
+
+  app.get('/governance/events', (req, res) => {
+    const planId = req.query.planId as string;
+    const eventType = req.query.eventType as string;
+
+    let filtered = governanceEvents;
+    if (planId) {
+      filtered = filtered.filter(e => e.plan_id === planId);
+    }
+    if (eventType) {
+      filtered = filtered.filter(e => e.event_type === eventType);
+    }
+
+    res.json({ ok: true, events: filtered });
+  });
+
+  // Vision (Work Requests & Receipts)
+  const visionWorkRequests: any[] = [
+    {
+      id: 1,
+      wr_id: 'plan_0053',
+      work_request_uuid: 'wr-uuid-0053',
+      dco_json: '{"lease_owner_pid":"14201","cost_limit_usd":5.00}',
+      context: { system: 'Auth Module', subsystem: 'OAuth Bridges' },
+      status: 'pending',
+      title: 'Auth Module V2 Implementation Plan',
+      recorded_on_dt: new Date(Date.now() - 7200000).toISOString(),
+      updated_at: new Date().toISOString(),
+    },
+    {
+      id: 2,
+      wr_id: 'plan_0054',
+      work_request_uuid: 'wr-uuid-0054',
+      dco_json: '{"lease_owner_pid":"14205","cost_limit_usd":10.00}',
+      context: { system: 'Storage Engine', subsystem: 'PostgreSQL Buffer' },
+      status: 'in_progress',
+      title: 'Storage Engine Buffer Cache Optimization',
+      recorded_on_dt: new Date(Date.now() - 3600000).toISOString(),
+      updated_at: new Date().toISOString(),
+    },
+  ];
+
+  app.post('/vision/work-requests', (req, res) => {
+    const { id, work_request_uuid, dco_json, context, status, title } = req.body || {};
+    if (!id) {
+      return res.status(400).json({ ok: false, error: 'Missing required field: id' });
+    }
+
+    const wrId = id.startsWith('plan_') ? id : `plan_${id}`;
+    let existing = visionWorkRequests.find(w => w.wr_id === wrId);
+    let action = 'updated';
+
+    if (!existing) {
+      action = 'created';
+      existing = {
+        id: visionWorkRequests.length + 1,
+        wr_id: wrId,
+        work_request_uuid: work_request_uuid || `uuid-${Date.now()}`,
+        dco_json: typeof dco_json === 'string' ? dco_json : JSON.stringify(dco_json || {}),
+        context: context || {},
+        status: status || 'pending',
+        title: title || `Work Request ${wrId}`,
+        recorded_on_dt: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      visionWorkRequests.push(existing);
+    } else {
+      if (work_request_uuid) existing.work_request_uuid = work_request_uuid;
+      if (dco_json) existing.dco_json = typeof dco_json === 'string' ? dco_json : JSON.stringify(dco_json);
+      if (context) existing.context = context;
+      if (status) existing.status = status;
+      if (title) existing.title = title;
+      existing.updated_at = new Date().toISOString();
+    }
+
+    res.json({
+      ok: true,
+      id: wrId,
+      work_request_uuid: existing.work_request_uuid,
+      action,
+    });
+  });
+
+  app.get('/vision/work-requests', (req, res) => {
+    const statusFilter = req.query.status as string;
+    let list = visionWorkRequests;
+    if (statusFilter) {
+      list = list.filter(w => w.status === statusFilter);
+    }
+    res.json({ ok: true, work_requests: list });
+  });
+
+  app.get('/vision/work-requests/:id', (req, res) => {
+    const targetId = req.params.id;
+    const found = visionWorkRequests.find(w => w.wr_id === targetId || w.wr_id === `plan_${targetId}` || String(w.id) === targetId);
+
+    if (!found) {
+      return res.status(404).json({ ok: false, error: `Work request not found: ${targetId}` });
+    }
+    res.json({ ok: true, work_request: found });
+  });
+
+  app.get('/vision/receipts', (req, res) => {
+    const planIdParam = req.query.planId as string;
+    if (!planIdParam) {
+      return res.status(400).json({ ok: false, error: 'Query parameter ?planId= is required' });
+    }
+
+    const planId = planIdParam.startsWith('plan_') ? planIdParam : `plan_${planIdParam}`;
+    const receipts = receiptsStore.filter(r => r.plan_id === planId);
+
+    res.json({
+      ok: true,
+      receipts: receipts.map((r, idx) => ({
+        id: r.id,
+        plan_id: r.plan_id,
+        type: r.type,
+        agent_role: r.agent_role,
+        session_id: r.session_id || 'sess-1001',
+        ticket_id: r.ticket_id || 'TCK-2026-0053',
+        artifact_path: r.artifact_path || 'IMPLEMENTATION_PLANS/active/auth.md',
+        summary: r.summary || 'Receipt summary',
+        metadata_json: r.metadata_json || '{}',
+        tokens_used: r.tokens_used || 1000,
+        created_at: r.created_at,
+        sequence: idx + 1,
+      })),
+    });
+  });
+
+  // Session Log SSE
+  app.get('/log/:sessionId', (req, res) => {
+    const sessionId = req.params.sessionId;
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    const metaMsg = JSON.stringify({
+      type: 'session_log_meta',
+      data: { sessionId, logFileExists: true, logPath: `/var/log/conduit/${sessionId}.log` },
+    });
+    res.write(`data: ${metaMsg}\n\n`);
+
+    const logLine = JSON.stringify({
+      type: 'session_log',
+      data: { sessionId, line: `[stdout] Kernel session ${sessionId} initialized and listening.`, timestamp: new Date().toISOString(), logType: 'stdout' },
+    });
+    res.write(`data: ${logLine}\n\n`);
+
+    req.on('close', () => {
+      res.end();
+    });
   });
 
   // Vite middleware for dev or static server in prod

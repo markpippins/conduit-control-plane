@@ -41,6 +41,8 @@ export interface SystemStatus {
   pgSchema: string;
   wrpKernelActive: boolean;
   wrpKernelUrl: string;
+  conduitSrvActive?: boolean;
+  conduitSrvUrl?: string;
   mcpServerUrl: string;
   activeLeasesCount: number;
   circuitBreakerTripped: boolean;
@@ -437,3 +439,167 @@ export interface SystemNode {
   linkedSpecsCount?: number;
   linkedWorkRequestsCount?: number;
 }
+
+// -------------------------------------------------------------
+// TypeScript conduit-srv (:3104) Types
+// -------------------------------------------------------------
+
+// Workflows
+export interface WorkflowItem {
+  workflowId: string;
+  runId: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled' | string;
+  startTime: string;
+  closeTime: string | null;
+  planId: string;
+  role: AgentRole;
+  pid?: number;
+}
+
+export interface WorkflowListResponse {
+  connected: boolean;
+  counts: {
+    running: number;
+    completed: number;
+    failed: number;
+    cancelled: number;
+    total: number;
+  };
+  workflows: WorkflowItem[];
+}
+
+// Ticket Detection & Lineage
+export interface TicketDetectionResponse {
+  detected: boolean;
+  stale: number;
+  expired: number;
+  timestamp: string;
+}
+
+export interface TicketLineageItem {
+  id: string;
+  role: AgentRole;
+  status: string;
+  tokens_used: number;
+  parent_ticket_id: string | null;
+  spawn_reason: string | null;
+  replacement_of: string | null;
+  closure_reason: string | null;
+  created_at: string;
+  closed_at: string | null;
+}
+
+export interface TicketLineageResponse {
+  plan_id: string;
+  tickets: TicketLineageItem[];
+}
+
+// Token Usage
+export interface TokenPlanUsageResponse {
+  plan_id: string;
+  total_tokens: number;
+  receipts: number;
+}
+
+export interface TokenRoleUsageResponse {
+  role: AgentRole;
+  total_tokens: number;
+  receipts: number;
+}
+
+export interface TokenTicketUsageResponse {
+  ticket_id: string;
+  tokens_used: number;
+}
+
+// Config
+export interface CronConfigResponse {
+  cron: string;
+  intervalMinutes: number;
+  description: string;
+  timestamp: string;
+}
+
+// Governance
+export interface GovernanceReplayResponse {
+  ok: boolean;
+  replayed: number;
+}
+
+export interface GovernanceEventItem {
+  id: number;
+  receipt_id: string;
+  event_type: string;
+  work_request_id?: string;
+  plan_id: string;
+  agent_role: AgentRole;
+  payload: any;
+  created_at: string;
+  replayed_at: string;
+}
+
+export interface GovernanceEventsResponse {
+  ok: boolean;
+  events: GovernanceEventItem[];
+}
+
+// Vision Work Requests
+export interface VisionWorkRequest {
+  id: number;
+  wr_id: string;
+  work_request_uuid: string;
+  dco_json: string;
+  context: Record<string, any>;
+  status: string;
+  title: string;
+  recorded_on_dt: string;
+  updated_at: string;
+}
+
+export interface VisionWorkRequestInput {
+  id: string;
+  work_request_uuid?: string;
+  dco_json?: string;
+  context?: Record<string, any>;
+  status?: string;
+  title?: string;
+}
+
+export interface VisionWorkRequestsResponse {
+  ok: boolean;
+  work_requests: VisionWorkRequest[];
+}
+
+export interface VisionWorkRequestSingleResponse {
+  ok: boolean;
+  work_request: VisionWorkRequest;
+}
+
+export interface VisionWorkRequestUpsertResponse {
+  ok: boolean;
+  id: string;
+  work_request_uuid: string;
+  action: 'created' | 'updated' | string;
+}
+
+// Vision Receipts
+export interface VisionReceiptItem {
+  id: string;
+  plan_id: string;
+  type: WRPState;
+  agent_role: AgentRole;
+  session_id: string;
+  ticket_id: string;
+  artifact_path: string;
+  summary: string;
+  metadata_json: string;
+  tokens_used: number;
+  created_at: string;
+  sequence: number;
+}
+
+export interface VisionReceiptsResponse {
+  ok: boolean;
+  receipts: VisionReceiptItem[];
+}
+

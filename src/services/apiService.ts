@@ -20,6 +20,20 @@ import {
   BreakerStateResponse,
   FailureRecoveryConfig,
   ModelChainConfig,
+  WorkflowListResponse,
+  TicketDetectionResponse,
+  TicketLineageResponse,
+  TokenPlanUsageResponse,
+  TokenRoleUsageResponse,
+  TokenTicketUsageResponse,
+  CronConfigResponse,
+  GovernanceReplayResponse,
+  GovernanceEventsResponse,
+  VisionWorkRequestsResponse,
+  VisionWorkRequestSingleResponse,
+  VisionWorkRequestInput,
+  VisionWorkRequestUpsertResponse,
+  VisionReceiptsResponse,
 } from '../types/conduit';
 
 import {
@@ -887,6 +901,298 @@ class ApiService {
     receipts = receipts.filter(r => !(r.plan_id === formatted && (types.length === 0 || types.includes(r.type))));
     localStorage.setItem(STORAGE_KEYS.RECEIPTS, JSON.stringify(receipts));
     return { deleted: countBefore - receipts.length, plan_id: formatted, types };
+  }
+
+  // 8. TypeScript conduit-srv (:3104) Methods
+
+  public async getConduitSrvHealth(): Promise<{ status: string; port: number; db: string; timestamp: string }> {
+    if (!this.useMock) {
+      try {
+        const res = await fetch('/health');
+        if (res.ok) return await res.json();
+      } catch (e) {
+        console.warn('GET /health offline', e);
+      }
+    }
+    return { status: 'ok', port: 3104, db: 'up', timestamp: new Date().toISOString() };
+  }
+
+  public async getWorkflows(): Promise<WorkflowListResponse> {
+    if (!this.useMock) {
+      try {
+        const res = await fetch('/workflows');
+        if (res.ok) return await res.json();
+      } catch (e) {
+        console.warn('GET /workflows offline', e);
+      }
+    }
+    const sessions = await this.getSessions(true);
+    return {
+      connected: true,
+      counts: { running: sessions.length, completed: 0, failed: 0, cancelled: 0, total: sessions.length },
+      workflows: sessions.map(s => ({
+        workflowId: `plan-plan_0053-${s.role}`,
+        runId: s.id,
+        status: s.state,
+        startTime: s.started_at,
+        closeTime: null,
+        planId: 'plan_0053',
+        role: s.role,
+        pid: s.pid,
+      })),
+    };
+  }
+
+  public async detectTickets(): Promise<TicketDetectionResponse> {
+    if (!this.useMock) {
+      try {
+        const res = await fetch('/tickets/detect', { method: 'POST' });
+        if (res.ok) return await res.json();
+      } catch (e) {
+        console.warn('POST /tickets/detect offline', e);
+      }
+    }
+    return { detected: true, stale: 1, expired: 0, timestamp: new Date().toISOString() };
+  }
+
+  public async getTicketLineage(planId: string): Promise<TicketLineageResponse> {
+    const formatted = planId.startsWith('plan_') ? planId : `plan_${planId}`;
+    if (!this.useMock) {
+      try {
+        const res = await fetch(`/tickets/lineage/${formatted}`);
+        if (res.ok) return await res.json();
+      } catch (e) {
+        console.warn('GET /tickets/lineage offline', e);
+      }
+    }
+    return {
+      plan_id: formatted,
+      tickets: [
+        {
+          id: 'TCK-2026-0053',
+          role: 'planner',
+          status: 'claimed',
+          tokens_used: 3600,
+          parent_ticket_id: null,
+          spawn_reason: null,
+          replacement_of: null,
+          closure_reason: null,
+          created_at: new Date(Date.now() - 7200000).toISOString(),
+          closed_at: null,
+        },
+      ],
+    };
+  }
+
+  public async getTokensByPlan(planId: string): Promise<TokenPlanUsageResponse> {
+    const formatted = planId.startsWith('plan_') ? planId : `plan_${planId}`;
+    if (!this.useMock) {
+      try {
+        const res = await fetch(`/tokens/plan/${formatted}`);
+        if (res.ok) return await res.json();
+      } catch (e) {
+        console.warn('GET /tokens/plan offline', e);
+      }
+    }
+    return { plan_id: formatted, total_tokens: 3600, receipts: 2 };
+  }
+
+  public async getTokensByRole(role: string): Promise<TokenRoleUsageResponse> {
+    if (!this.useMock) {
+      try {
+        const res = await fetch(`/tokens/role/${encodeURIComponent(role)}`);
+        if (res.ok) return await res.json();
+      } catch (e) {
+        console.warn('GET /tokens/role offline', e);
+      }
+    }
+    return { role, total_tokens: 4200, receipts: 3 };
+  }
+
+  public async getTokensByTicket(ticketId: string): Promise<TokenTicketUsageResponse> {
+    if (!this.useMock) {
+      try {
+        const res = await fetch(`/tokens/ticket/${encodeURIComponent(ticketId)}`);
+        if (res.ok) return await res.json();
+      } catch (e) {
+        console.warn('GET /tokens/ticket offline', e);
+      }
+    }
+    return { ticket_id: ticketId, tokens_used: 1500 };
+  }
+
+  public async getCronConfig(): Promise<CronConfigResponse> {
+    if (!this.useMock) {
+      try {
+        const res = await fetch('/config/cron');
+        if (res.ok) return await res.json();
+      } catch (e) {
+        console.warn('GET /config/cron offline', e);
+      }
+    }
+    return { cron: '*/3 * * * *', intervalMinutes: 3, description: 'Pipeline cron interval', timestamp: new Date().toISOString() };
+  }
+
+  public async replayGovernance(): Promise<GovernanceReplayResponse> {
+    if (!this.useMock) {
+      try {
+        const res = await fetch('/governance/replay', { method: 'POST' });
+        if (res.ok) return await res.json();
+      } catch (e) {
+        console.warn('POST /governance/replay offline', e);
+      }
+    }
+    return { ok: true, replayed: 2 };
+  }
+
+  public async getGovernanceEvents(planId?: string, eventType?: string): Promise<GovernanceEventsResponse> {
+    if (!this.useMock) {
+      try {
+        const queryParams = new URLSearchParams();
+        if (planId) queryParams.set('planId', planId);
+        if (eventType) queryParams.set('eventType', eventType);
+        const res = await fetch(`/governance/events?${queryParams.toString()}`);
+        if (res.ok) return await res.json();
+      } catch (e) {
+        console.warn('GET /governance/events offline', e);
+      }
+    }
+    return {
+      ok: true,
+      events: [
+        {
+          id: 1,
+          receipt_id: 'RCP-PLAN-0053-1',
+          event_type: 'receipt:PROPOSED',
+          work_request_id: 'wr-uuid-0053',
+          plan_id: 'plan_0053',
+          agent_role: 'planner',
+          payload: { session_id: 'sess-1001', artifact_path: 'IMPLEMENTATION_PLANS/pending/auth-module.md', summary: 'Initial proposal' },
+          created_at: new Date(Date.now() - 7200000).toISOString(),
+          replayed_at: new Date().toISOString(),
+        },
+      ],
+    };
+  }
+
+  public async getVisionWorkRequests(status?: string): Promise<VisionWorkRequestsResponse> {
+    if (!this.useMock) {
+      try {
+        const url = status ? `/vision/work-requests?status=${encodeURIComponent(status)}` : '/vision/work-requests';
+        const res = await fetch(url);
+        if (res.ok) return await res.json();
+      } catch (e) {
+        console.warn('GET /vision/work-requests offline', e);
+      }
+    }
+    return {
+      ok: true,
+      work_requests: [
+        {
+          id: 1,
+          wr_id: 'plan_0053',
+          work_request_uuid: 'wr-uuid-0053',
+          dco_json: '{"lease_owner_pid":"14201","cost_limit_usd":5.00}',
+          context: { system: 'Auth Module', subsystem: 'OAuth Bridges' },
+          status: 'pending',
+          title: 'Auth Module V2 Implementation Plan',
+          recorded_on_dt: new Date(Date.now() - 7200000).toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        {
+          id: 2,
+          wr_id: 'plan_0054',
+          work_request_uuid: 'wr-uuid-0054',
+          dco_json: '{"lease_owner_pid":"14205","cost_limit_usd":10.00}',
+          context: { system: 'Storage Engine', subsystem: 'PostgreSQL Buffer' },
+          status: 'in_progress',
+          title: 'Storage Engine Buffer Cache Optimization',
+          recorded_on_dt: new Date(Date.now() - 3600000).toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ],
+    };
+  }
+
+  public async getVisionWorkRequestById(id: string): Promise<VisionWorkRequestSingleResponse> {
+    if (!this.useMock) {
+      try {
+        const res = await fetch(`/vision/work-requests/${encodeURIComponent(id)}`);
+        if (res.ok) return await res.json();
+      } catch (e) {
+        console.warn('GET /vision/work-requests/:id offline', e);
+      }
+    }
+    return {
+      ok: true,
+      work_request: {
+        id: 1,
+        wr_id: id.startsWith('plan_') ? id : `plan_${id}`,
+        work_request_uuid: 'wr-uuid-0053',
+        dco_json: '{"lease_owner_pid":"14201","cost_limit_usd":5.00}',
+        context: { system: 'Auth Module', subsystem: 'OAuth Bridges' },
+        status: 'pending',
+        title: 'Auth Module V2 Implementation Plan',
+        recorded_on_dt: new Date(Date.now() - 7200000).toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    };
+  }
+
+  public async upsertVisionWorkRequest(payload: VisionWorkRequestInput): Promise<VisionWorkRequestUpsertResponse> {
+    if (!this.useMock) {
+      try {
+        const res = await fetch('/vision/work-requests', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (res.ok) return await res.json();
+      } catch (e) {
+        console.warn('POST /vision/work-requests offline', e);
+      }
+    }
+    const wrId = payload.id.startsWith('plan_') ? payload.id : `plan_${payload.id}`;
+    return {
+      ok: true,
+      id: wrId,
+      work_request_uuid: payload.work_request_uuid || `uuid-${Date.now()}`,
+      action: 'created',
+    };
+  }
+
+  public async getVisionReceipts(planId: string): Promise<VisionReceiptsResponse> {
+    const formatted = planId.startsWith('plan_') ? planId : `plan_${planId}`;
+    if (!this.useMock) {
+      try {
+        const res = await fetch(`/vision/receipts?planId=${encodeURIComponent(formatted)}`);
+        if (res.ok) return await res.json();
+      } catch (e) {
+        console.warn('GET /vision/receipts offline', e);
+      }
+    }
+    const receipts = await this.getFormattedReceipts(formatted);
+    return {
+      ok: true,
+      receipts: receipts.map((r, idx) => ({
+        id: r.id,
+        plan_id: r.plan_id,
+        type: r.type,
+        agent_role: r.agent_role,
+        session_id: r.session_id || 'sess-1001',
+        ticket_id: r.ticket_id || 'TCK-2026-0053',
+        artifact_path: r.artifact_path || 'IMPLEMENTATION_PLANS/active/auth.md',
+        summary: r.summary,
+        metadata_json: r.metadata_json || '{}',
+        tokens_used: r.tokens_used || 1000,
+        created_at: r.created_at,
+        sequence: idx + 1,
+      })),
+    };
+  }
+
+  public getSessionLogSseUrl(sessionId: string): string {
+    return `/log/${encodeURIComponent(sessionId)}`;
   }
 
   // Model Chains Helper

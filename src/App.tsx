@@ -288,7 +288,36 @@ export default function App() {
       <NewPlanModal
         isOpen={isNewPlanOpen}
         onClose={() => setIsNewPlanOpen(false)}
-        onSubmit={async () => {}}
+        onSubmit={(newTitle, newDesc) => {
+          const newTicketId = `WRP-${Math.floor(100 + Math.random() * 900)}`;
+          const newPlanId = `plan_${String(plans.length + 54).padStart(4, '0')}`;
+          const newPlanObj: ImplementationPlan = {
+            id: newPlanId,
+            ticketId: newTicketId,
+            title: newTitle,
+            description: newDesc,
+            currentRole: 'planner',
+            modelChain: ['gemini-2.5-pro', 'gemini-2.5-flash'],
+            activeModel: 'gemini-2.5-pro',
+            status: 'ACTIVE',
+            costUsd: 0.12,
+            tokenCount: 45000,
+            retryAttempts: 0,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            receipts: [
+              {
+                id: `rcp_gen_${Date.now().toString().slice(-6)}`,
+                ticketId: newTicketId,
+                receiptType: 'PROPOSED',
+                issuedAt: new Date().toISOString(),
+                payload: { action: 'Plan Proposed via Template Modal', title: newTitle },
+                hash: `0x${Math.random().toString(16).substring(2, 14)}`,
+              },
+            ],
+          };
+          setPlans((prev) => [newPlanObj, ...prev]);
+        }}
       />
 
       <DetailDrawer
