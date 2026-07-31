@@ -55,6 +55,7 @@ const STORAGE_KEYS = {
 
 class ApiService {
   private useMock: boolean = true;
+  private liveModeDetected: boolean | null = null; // null = not yet checked
 
   constructor() {
     const storedMock = localStorage.getItem(STORAGE_KEYS.USE_MOCK);
@@ -64,6 +65,32 @@ class ApiService {
       this.useMock = true;
     }
     this.initLocalStorage();
+  }
+
+  /**
+   * Check the server's /api/status endpoint to determine if the server
+   * is running in live mode (proxying to real backends). If so, disable
+   * mock mode so the client fetches real data.
+   *
+   * Call this once on app mount, before any data refresh.
+   */
+  public async initializeMode(): Promise<boolean> {
+    try {
+      const res = await fetch('/api/status');
+      if (res.ok) {
+        const status = await res.json();
+        if (status.liveMode === true) {
+          this.useMock = false;
+          this.liveModeDetected = true;
+          localStorage.setItem(STORAGE_KEYS.USE_MOCK, 'false');
+          return true;
+        }
+      }
+    } catch (e) {
+      console.warn('Could not reach /api/status to detect live mode — using mock', e);
+    }
+    this.liveModeDetected = false;
+    return false;
   }
 
   public isMockMode(): boolean {

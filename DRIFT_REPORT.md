@@ -1,7 +1,61 @@
 # Drift Report: Mock Backend vs Real REST APIs (Dual-Backend)
 
-**Generated:** 2026-07-27 (updated)
+**Generated:** 2026-07-27 (updated 2026-07-30)
 **Scope:** `nexus/angular/conduit-ui/` (mock backend) vs two live backends
+
+---
+
+## ⚡ Status Update: 2026-07-30 — Major drift reduction
+
+Since the original drift report was filed on 2026-07-27, the following has been
+implemented by the Engineer to close the gap between this UI and the real conduit
+backends:
+
+### Implemented
+
+| Feature | Details |
+|---------|---------|
+| **CONDUIT_LIVE_MODE** | `.env` flag (`CONDUIT_LIVE_MODE=true`) enables live backend proxying. Default: `false` (mock mode). |
+| **Dual-mode proxy in `server.ts`** | Mock routes wrapped in `if (!LIVE_MODE)`. Live mode adds fetch-based proxy middleware that routes requests to the correct backend based on path prefix. |
+| **Backend routing** | `/state`, `/delta`, `/replay`, `/admin`, `/api/sessions`, `/api/breaker`, `/api/receipts`, `/healthz`, `/readyz`, `/metrics` → conduit-mcp :3100. `/health`, `/workflows`, `/tickets`, `/tokens`, `/config`, `/governance`, `/vision`, `/log` → conduit-srv :3104. |
+| **SSE streaming proxy** | `/log/:sessionId` uses Node's `http.request()` with pipe-through (not fetch) so SSE log chunks stream in real-time from conduit-srv :3104. Includes client-disconnect abort and backend error handling. |
+| **Shared `filterHeaders()`** | Hop-by-hop header stripping (`host`, `connection`, `transfer-encoding`, `content-length`) extracted into shared helper used by both proxy functions. |
+| **Client auto-detection** | `apiService.initializeMode()` fetches `/api/status` on mount; if `liveMode: true`, disables mock so all fetches hit the proxy → real backends. |
+| **Mode-based port selection** | Mock mode → port **3000**. Live mode → port **4201**. `server.ts` selects automatically: `const PORT = LIVE_MODE ? 4201 : 3000`. No PORT override needed in `.env` or systemd. |
+
+### Drift findings RESOLVED (from the 2026-07-27 REVISED report)
+
+| Original Finding | Resolution |
+|------------------|------------|
+| **CRITICAL-1:** Not wired to any conduit backend | ✅ `apiService.ts` now has live-fetch paths for all routes, with fallback to localStorage on error |
+| **CRITICAL-2:** conduit-srv routes invisible | ✅ Dedicated apiService methods for all conduit-srv routes: workflows, tickets, tokens, config, governance, vision |
+| **HIGH-1:** Decoupled from conduit infrastructure | ✅ Full dual-backend topology mirrored in apiService + server.ts proxy |
+| **HIGH-2:** `WRP_KERNEL_URL` references :3103 (not running) | ⚠️ Partially — `/api/status` still shows :3103 as informational. Python conduit is not running; state inspection routes proxy to conduit-mcp :3100 instead |
+| **HIGH-3:** No proxy rule for conduit-srv | ✅ Proxy middleware routes conduit-srv paths to :3104 |
+| **MED-1:** `/log/:sessionId` had no backend | ✅ SSE streaming proxy to conduit-srv :3104 with real-time pipe-through |
+
+### Remaining gaps
+
+- **Python conduit (:3103) is not running** — state inspection routes proxy to conduit-mcp :3100 instead, which covers `/state` but not the full Python conduit API surface (delta ingestion, replay, admin identities).
+- **Pipeline workflow endpoints** (harvest → candidate → intent → requirement → spec → deliberation → plan) still have no real backend equivalent in either conduit-mcp or conduit-srv — they remain mock-only.
+- **`useMock` defaults to localStorage preference** — if a user previously toggled mock on, that persists across sessions even if the server is in live mode. The client respects the server's `liveMode` signal on first mount but retains user override.
+
+### How to test
+
+```bash
+# Mock mode (default) — port 3000
+curl http://localhost:3000/api/status  # → liveMode: false
+curl http://localhost:3000/state        # → mock data (kernel_version: 42)
+
+# Live mode — set CONDUIT_LIVE_MODE=true in .env, restart, then:
+curl http://localhost:4201/api/status  # → liveMode: true
+curl http://localhost:4201/state        # → real pipeline data from conduit-mcp :3100
+curl http://localhost:4201/workflows    # → real data from conduit-srv :3104
+```
+
+---
+
+## Original Report (2026-07-27)
 **Backends:**
 | Backend | Port | Stack | Role |
 |---------|------|-------|------|
