@@ -1,14 +1,91 @@
+import 'dotenv/config';
+import http from 'http';
 import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 
 async function startServer() {
   const app = express();
-  const PORT = parseInt(process.env.PORT || '3000', 10);
+  const LIVE_MODE = process.env.CONDUIT_LIVE_MODE === 'true';
+  const PORT = LIVE_MODE ? 4201 : 3000;
+  const MCP_URL = process.env.CONDUIT_MCP_URL || 'http://localhost:3100';
+  const SRV_URL = process.env.CONDUIT_SRV_URL || 'http://localhost:3104';
 
   app.use(express.json());
 
-  // In-Memory Kernel Engine Mock State for server
+  // ============================================================
+  // Proxy helpers — forward requests to real backends in live mode
+  // ============================================================
+  const MCP_PREFIXES = ['/state', '/delta', '/replay', '/admin', '/api/sessions', '/api/breaker', '/api/receipts'];
+  const SRV_PREFIXES = ['/health', '/workflows', '/tickets', '/tokens', '/config', '/governance', '/vision', '/log'];
+
+  /** Response headers never forwarded from backend to the SPA (hop-by-hop + security). */
+  const STRIPPED_RESPONSE_HEADERS = [
+    'transfer-encoding',
+    'connection',
+    'keep-alive',
+    'content-security-policy',
+    'content-security-policy-report-only',
+  ];
+
+  function getBackendForPath(p: string): string | null {
+    if (MCP_PREFIXES.some(pref => p === pref || p.startsWith(pref + '/'))) return MCP_URL;
+    if (SRV_PREFIXES.some(pref => p === pref || p.startsWith(pref + '/'))) return SRV_URL;
+    if (['/healthz', '/readyz', '/metrics'].includes(p)) return MCP_URL;
+    // NOTE: '/' must NOT be proxied — conduit-mcp returns 404 + CSP 'default-src none',
+    // which would poison the SPA page. Vite serves the root. Keep it out of the lists above.
+    return null;
+  }
+
+  /** Strip hop-by-hop headers from an incoming request before proxying. */
+  function filterHeaders(incoming: Record<string, string | string[] | undefined>): Record<string, string> {
+    const hopByHop = ['host', 'connection', 'transfer-encoding', 'content-length'];
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(incoming)) {
+      if (v && !hopByHop.includes(k.toLowerCase())) {
+        out[k] = Array.isArray(v) ? v[0] : String(v);
+      }
+    }
+    return out;
+  }
+
+  /** fetch()-based proxy for standard JSON request/response patterns. */
+  async function proxyToBackend(targetBase: string, req: express.Request, res: express.Response) {
+    const qs = req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : '';
+    const url = `${targetBase}${req.path}${qs}`;
+    const headers = filterHeaders(req.headers);
+
+    const opts: RequestInit = { method: req.method, headers };
+    if (!['GET', 'HEAD'].includes(req.method) && req.body) {
+      opts.body = JSON.stringify(req.body);
+      headers['content-type'] = 'application/json';
+    }
+
+    try {
+      const fetchRes = await fetch(url, opts);
+      res.status(fetchRes.status);
+      fetchRes.headers.forEach((v, k) => {
+        const kLower = k.toLowerCase();
+        // Never forward backend CSP headers — the SPA is the only source of its CSP.
+        // Backend 404/error pages (e.g. conduit-mcp's 'default-src none') would otherwise
+        // poison the page and block legitimate browser requests.
+        if (!STRIPPED_RESPONSE_HEADERS.includes(kLower)) {
+          res.set(k, v);
+        }
+      });
+      const body = await fetchRes.text();
+      res.send(body);
+    } catch (err: any) {
+      console.error(`Proxy error → ${targetBase}:`, err.message);
+      res.status(502).json({
+        error: { code: 'BAD_GATEWAY', message: `Backend unreachable: ${targetBase}` }
+      });
+    }
+  }
+
+  // ============================================================
+  // In-Memory Mock State (always defined — used by /api/status)
+  // ============================================================
   let kernelVersion = 42;
   const identitiesMap = new Map<string, any>([
     [
@@ -128,6 +205,90 @@ async function startServer() {
     },
   ];
 
+  const mockTickets = [
+    {
+      id: 'TCK-2026-0053',
+      plan_id: 'plan_0053',
+      role: 'planner',
+      status: 'claimed',
+      tokens_used: 3600,
+      parent_ticket_id: null,
+      spawn_reason: null,
+      replacement_of: null,
+      closure_reason: null,
+      created_at: new Date(Date.now() - 7200000).toISOString(),
+      closed_at: null,
+    },
+    {
+      id: 'TCK-2026-0054',
+      plan_id: 'plan_0054',
+      role: 'builder',
+      status: 'claimed',
+      tokens_used: 1800,
+      parent_ticket_id: 'TCK-2026-0053',
+      spawn_reason: 'Child builder execution',
+      replacement_of: null,
+      closure_reason: null,
+      created_at: new Date(Date.now() - 3600000).toISOString(),
+      closed_at: null,
+    },
+  ];
+
+  const governanceEvents = [
+    {
+      id: 1,
+      receipt_id: 'RCP-PLAN-0053-1',
+      event_type: 'receipt:PROPOSED',
+      work_request_id: 'wr-uuid-0053',
+      plan_id: 'plan_0053',
+      agent_role: 'planner',
+      payload: { session_id: 'sess-1001', artifact_path: 'IMPLEMENTATION_PLANS/pending/auth-module.md', summary: 'Initial proposal', tokens_used: 1200 },
+      created_at: new Date(Date.now() - 7200000).toISOString(),
+      replayed_at: new Date().toISOString(),
+    },
+    {
+      id: 2,
+      receipt_id: 'RCP-PLAN-0053-2',
+      event_type: 'receipt:PLAN_CREATE',
+      work_request_id: 'wr-uuid-0053',
+      plan_id: 'plan_0053',
+      agent_role: 'planner',
+      payload: { session_id: 'sess-1001', artifact_path: 'IMPLEMENTATION_PLANS/active/auth-module.md', summary: 'Plan created and validated', tokens_used: 2400 },
+      created_at: new Date(Date.now() - 3600000).toISOString(),
+      replayed_at: new Date().toISOString(),
+    },
+  ];
+
+  const visionWorkRequests: any[] = [
+    {
+      id: 1,
+      wr_id: 'plan_0053',
+      work_request_uuid: 'wr-uuid-0053',
+      dco_json: '{"lease_owner_pid":"14201","cost_limit_usd":5.00}',
+      context: { system: 'Auth Module', subsystem: 'OAuth Bridges' },
+      status: 'pending',
+      title: 'Auth Module V2 Implementation Plan',
+      recorded_on_dt: new Date(Date.now() - 7200000).toISOString(),
+      updated_at: new Date().toISOString(),
+    },
+    {
+      id: 2,
+      wr_id: 'plan_0054',
+      work_request_uuid: 'wr-uuid-0054',
+      dco_json: '{"lease_owner_pid":"14205","cost_limit_usd":10.00}',
+      context: { system: 'Storage Engine', subsystem: 'PostgreSQL Buffer' },
+      status: 'in_progress',
+      title: 'Storage Engine Buffer Cache Optimization',
+      recorded_on_dt: new Date(Date.now() - 3600000).toISOString(),
+      updated_at: new Date().toISOString(),
+    },
+  ];
+
+  // ============================================================
+  // MOCK MODE — all routes served from in-memory state
+  // ============================================================
+  if (!LIVE_MODE) {
+
   // System Endpoints
   app.get('/api/info', (req, res) => {
     res.json({
@@ -165,22 +326,6 @@ async function startServer() {
       `kernel_identity_count ${identitiesMap.size}`,
     ].join('\n');
     res.type('text/plain').send(metrics);
-  });
-
-  app.get('/api/status', (req, res) => {
-    res.json({
-      pgConnected: Boolean(process.env.CONDUIT_PG_DSN),
-      pgDsn: process.env.CONDUIT_PG_DSN || 'postgresql://nexus_admin:***@postgres.internal.nexus:5432/nexus (stub)',
-      pgSchema: process.env.CONDUIT_PG_SCHEMA || 'conduit',
-      wrpKernelActive: true,
-      wrpKernelUrl: process.env.WRP_KERNEL_URL || 'http://localhost:3103',
-      conduitSrvActive: true,
-      conduitSrvUrl: process.env.CONDUIT_SRV_URL || 'http://localhost:3104',
-      mcpServerUrl: process.env.MCP_BASE_URL || 'http://localhost:3100',
-      activeLeasesCount: sessionsStore.filter(s => s.state === 'running').length,
-      circuitBreakerTripped: circuitBreakerState.tripped,
-      lastSyncTimestamp: new Date().toISOString(),
-    });
   });
 
   // -------------------------------------------------------------
@@ -282,7 +427,6 @@ async function startServer() {
     let resolved = identitiesMap.get(rawId) || identitiesMap.get(`iden::${rawId}`);
 
     if (!resolved) {
-      // search by alias
       for (const iden of identitiesMap.values()) {
         if (iden.aliases.includes(rawId) || iden.node_ids.includes(rawId)) {
           resolved = iden;
@@ -714,35 +858,6 @@ async function startServer() {
   });
 
   // Tickets
-  const mockTickets = [
-    {
-      id: 'TCK-2026-0053',
-      plan_id: 'plan_0053',
-      role: 'planner',
-      status: 'claimed',
-      tokens_used: 3600,
-      parent_ticket_id: null,
-      spawn_reason: null,
-      replacement_of: null,
-      closure_reason: null,
-      created_at: new Date(Date.now() - 7200000).toISOString(),
-      closed_at: null,
-    },
-    {
-      id: 'TCK-2026-0054',
-      plan_id: 'plan_0054',
-      role: 'builder',
-      status: 'claimed',
-      tokens_used: 1800,
-      parent_ticket_id: 'TCK-2026-0053',
-      spawn_reason: 'Child builder execution',
-      replacement_of: null,
-      closure_reason: null,
-      created_at: new Date(Date.now() - 3600000).toISOString(),
-      closed_at: null,
-    },
-  ];
-
   app.post('/tickets/detect', (req, res) => {
     res.json({
       detected: true,
@@ -827,31 +942,6 @@ async function startServer() {
   });
 
   // Governance
-  const governanceEvents = [
-    {
-      id: 1,
-      receipt_id: 'RCP-PLAN-0053-1',
-      event_type: 'receipt:PROPOSED',
-      work_request_id: 'wr-uuid-0053',
-      plan_id: 'plan_0053',
-      agent_role: 'planner',
-      payload: { session_id: 'sess-1001', artifact_path: 'IMPLEMENTATION_PLANS/pending/auth-module.md', summary: 'Initial proposal', tokens_used: 1200 },
-      created_at: new Date(Date.now() - 7200000).toISOString(),
-      replayed_at: new Date().toISOString(),
-    },
-    {
-      id: 2,
-      receipt_id: 'RCP-PLAN-0053-2',
-      event_type: 'receipt:PLAN_CREATE',
-      work_request_id: 'wr-uuid-0053',
-      plan_id: 'plan_0053',
-      agent_role: 'planner',
-      payload: { session_id: 'sess-1001', artifact_path: 'IMPLEMENTATION_PLANS/active/auth-module.md', summary: 'Plan created and validated', tokens_used: 2400 },
-      created_at: new Date(Date.now() - 3600000).toISOString(),
-      replayed_at: new Date().toISOString(),
-    },
-  ];
-
   app.post('/governance/replay', (req, res) => {
     res.json({ ok: true, replayed: governanceEvents.length });
   });
@@ -872,31 +962,6 @@ async function startServer() {
   });
 
   // Vision (Work Requests & Receipts)
-  const visionWorkRequests: any[] = [
-    {
-      id: 1,
-      wr_id: 'plan_0053',
-      work_request_uuid: 'wr-uuid-0053',
-      dco_json: '{"lease_owner_pid":"14201","cost_limit_usd":5.00}',
-      context: { system: 'Auth Module', subsystem: 'OAuth Bridges' },
-      status: 'pending',
-      title: 'Auth Module V2 Implementation Plan',
-      recorded_on_dt: new Date(Date.now() - 7200000).toISOString(),
-      updated_at: new Date().toISOString(),
-    },
-    {
-      id: 2,
-      wr_id: 'plan_0054',
-      work_request_uuid: 'wr-uuid-0054',
-      dco_json: '{"lease_owner_pid":"14205","cost_limit_usd":10.00}',
-      context: { system: 'Storage Engine', subsystem: 'PostgreSQL Buffer' },
-      status: 'in_progress',
-      title: 'Storage Engine Buffer Cache Optimization',
-      recorded_on_dt: new Date(Date.now() - 3600000).toISOString(),
-      updated_at: new Date().toISOString(),
-    },
-  ];
-
   app.post('/vision/work-requests', (req, res) => {
     const { id, work_request_uuid, dco_json, context, status, title } = req.body || {};
     if (!id) {
@@ -1009,6 +1074,121 @@ async function startServer() {
     });
   });
 
+  } // end if (!LIVE_MODE) — mock routes block
+
+  /**
+   * Streaming proxy using http.request() with pipe-through.
+   * Used for SSE endpoints so data streams in real-time to the client
+   * instead of being buffered by fetch().
+   */
+  function proxyStreamToBackend(targetBase: string, req: express.Request, res: express.Response) {
+    const targetUrl = new URL(targetBase);
+    const qs = req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : '';
+    const headers = filterHeaders(req.headers);
+
+    const options: http.RequestOptions = {
+      hostname: targetUrl.hostname,
+      port: targetUrl.port,
+      path: `${req.path}${qs}`,
+      method: req.method,
+      headers,
+    };
+
+    const proxyReq = http.request(options, (proxyRes) => {
+      // Forward status and headers from the backend, then pipe the stream.
+      // Strip backend CSP headers (consistent with proxyToBackend) so error-page
+      // policies never leak into responses served to the SPA.
+      // Node lowercases incoming header names, so the shared lowercase list matches directly.
+      const headers: Record<string, any> = { ...proxyRes.headers };
+      for (const h of STRIPPED_RESPONSE_HEADERS) {
+        delete headers[h];
+      }
+      res.writeHead(proxyRes.statusCode || 200, headers);
+      proxyRes.pipe(res);
+
+      // If the backend connection drops mid-stream, clean up
+      proxyRes.on('error', (err: Error) => {
+        console.error(`Stream proxy response error → ${targetBase}:`, err.message);
+        if (res.headersSent) res.destroy();
+        else res.status(502).json({ error: { code: 'BAD_GATEWAY', message: 'Backend streaming error' } });
+      });
+    });
+
+    proxyReq.on('error', (err: Error) => {
+      console.error(`Stream proxy error → ${targetBase}:`, err.message);
+      if (res.headersSent) {
+        res.destroy();
+      } else {
+        res.status(502).json({
+          error: { code: 'BAD_GATEWAY', message: `Backend unreachable: ${targetBase}` }
+        });
+      }
+    });
+
+    // When the client disconnects, abort the upstream request
+    req.on('close', () => {
+      proxyReq.destroy();
+    });
+
+    // Forward the request body if present
+    if (req.body && Object.keys(req.body).length > 0) {
+      proxyReq.write(JSON.stringify(req.body));
+    }
+    proxyReq.end();
+  }
+
+  // ============================================================
+  // LIVE MODE — proxy API calls to real conduit backends
+  // ============================================================
+  if (LIVE_MODE) {
+    app.all('*', async (req, res, next) => {
+      const target = getBackendForPath(req.path);
+      if (target) {
+        // Use streaming proxy for SSE endpoints so logs stream in real-time
+        if (req.path.startsWith('/log/')) {
+          return proxyStreamToBackend(target, req, res);
+        }
+        return proxyToBackend(target, req, res);
+      }
+      next(); // not an API path → let Vite/static handle
+    });
+  }
+
+  // ============================================================
+  // /api/status — always available (server-side, reports mode)
+  // ============================================================
+  app.get('/api/status', (req, res) => {
+    const base = {
+      pgConnected: Boolean(process.env.CONDUIT_PG_DSN),
+      pgDsn: process.env.CONDUIT_PG_DSN || 'postgresql://nexus_admin:***@postgres.internal.nexus:5432/nexus (stub)',
+      pgSchema: process.env.CONDUIT_PG_SCHEMA || 'conduit',
+      wrpKernelActive: true,
+      wrpKernelUrl: process.env.WRP_KERNEL_URL || 'http://localhost:3103',
+      activeLeasesCount: sessionsStore.filter(s => s.state === 'running').length,
+      circuitBreakerTripped: circuitBreakerState.tripped,
+      lastSyncTimestamp: new Date().toISOString(),
+    };
+
+    if (LIVE_MODE) {
+      res.json({
+        ...base,
+        liveMode: true,
+        conduitMcpUrl: MCP_URL,
+        conduitSrvUrl: SRV_URL,
+        conduitSrvActive: true,
+        mcpServerUrl: MCP_URL,
+      });
+    } else {
+      res.json({
+        ...base,
+        liveMode: false,
+        conduitSrvActive: true,
+        conduitSrvUrl: process.env.CONDUIT_SRV_URL || 'http://localhost:3104',
+        mcpServerUrl: process.env.MCP_BASE_URL || 'http://localhost:3100',
+      });
+    }
+  });
+
   // Vite middleware for dev or static server in prod
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
@@ -1025,7 +1205,8 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`WRP Kernel Runtime & Control Plane running on http://0.0.0.0:${PORT}`);
+    const mode = LIVE_MODE ? `LIVE (→ MCP ${MCP_URL} | SRV ${SRV_URL})` : 'MOCK';
+    console.log(`WRP Kernel Runtime & Control Plane running on http://0.0.0.0:${PORT} [${mode}]`);
   });
 }
 

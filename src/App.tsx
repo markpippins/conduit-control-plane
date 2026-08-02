@@ -148,6 +148,20 @@ export default function App() {
     }
   };
 
+  // On mount, check if the server is in live mode (CONDUIT_LIVE_MODE=true).
+  // If so, disable mock so the client fetches real data from proxied backends.
+  useEffect(() => {
+    let cancelled = false;
+    const init = async () => {
+      const isLive = await apiService.initializeMode();
+      if (!cancelled) {
+        setIsMockMode(!isLive);
+      }
+    };
+    init();
+    return () => { cancelled = true; };
+  }, []); // run once on mount
+
   useEffect(() => {
     refreshAllData();
   }, [isMockMode]);
