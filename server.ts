@@ -19,15 +19,6 @@ async function startServer() {
   const MCP_PREFIXES = ['/state', '/delta', '/replay', '/admin', '/api/sessions', '/api/breaker', '/api/receipts'];
   const SRV_PREFIXES = ['/health', '/workflows', '/tickets', '/tokens', '/config', '/governance', '/vision', '/log'];
 
-  /** Response headers never forwarded from backend to the SPA (hop-by-hop + security). */
-  const STRIPPED_RESPONSE_HEADERS = [
-    'transfer-encoding',
-    'connection',
-    'keep-alive',
-    'content-security-policy',
-    'content-security-policy-report-only',
-  ];
-
   function getBackendForPath(p: string): string | null {
     if (MCP_PREFIXES.some(pref => p === pref || p.startsWith(pref + '/'))) return MCP_URL;
     if (SRV_PREFIXES.some(pref => p === pref || p.startsWith(pref + '/'))) return SRV_URL;
@@ -69,7 +60,7 @@ async function startServer() {
         // Never forward backend CSP headers — the SPA is the only source of its CSP.
         // Backend 404/error pages (e.g. conduit-mcp's 'default-src none') would otherwise
         // poison the page and block legitimate browser requests.
-        if (!STRIPPED_RESPONSE_HEADERS.includes(kLower)) {
+        if (!['transfer-encoding', 'connection', 'keep-alive', 'content-security-policy', 'content-security-policy-report-only'].includes(kLower)) {
           res.set(k, v);
         }
       });
@@ -1098,11 +1089,9 @@ async function startServer() {
       // Forward status and headers from the backend, then pipe the stream.
       // Strip backend CSP headers (consistent with proxyToBackend) so error-page
       // policies never leak into responses served to the SPA.
-      // Node lowercases incoming header names, so the shared lowercase list matches directly.
       const headers: Record<string, any> = { ...proxyRes.headers };
-      for (const h of STRIPPED_RESPONSE_HEADERS) {
-        delete headers[h];
-      }
+      delete headers['content-security-policy'];
+      delete headers['content-security-policy-report-only'];
       res.writeHead(proxyRes.statusCode || 200, headers);
       proxyRes.pipe(res);
 
